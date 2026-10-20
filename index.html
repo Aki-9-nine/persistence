@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>不为零坚持器</title>
+<style>
+  /* ============================================================
+     不为零坚持器 · 单文件版（多项目）
+     ------------------------------------------------------------
+     核心约定：
+       1. 首页只有两种状态，互斥渲染：
+          A. 无项目  → 只显示「还没有坚持项目 + 创建项目」
+          B. 有项目  → 只显示「项目名 / N 天 / 今天做了 / 历史最长」
+       2. 用 hidden 属性控制显隐，并配合下方
+          [hidden] { display: none !important; }
+          保证不会被任何 display 规则意外覆盖。
+       3. 数据存 localStorage；退出后回到上次停留的项目。
+       4. 打卡动画：数字中间划线（渐显→渐隐）→ 新数字渐显，约 0.8 秒。
+       5. 无外部库，双击浏览器打开即用。
+     ============================================================ */
+
+  :root {
+    --bg: #f5f5f7;
+    --panel: #ffffff;
+    --text: #232326;
+    --muted: #9aa0a6;
+    --line: #ececef;
+    --accent: #3a2b52;      /* 紫黑：成功色 */
+    --accent-tint: #ece6f3;
+    --btn-idle: #33333a;    /* 中性深灰：未打卡 */
+    --radius: 18px;
+    --sidebar-w: 260px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  /* 【关键】hidden 一律强制隐藏，优先级最高 */
+  [hidden] { display: none !important; }
+
+  html, body { height: 100%; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+  }
+
+  /* ============ 左上三横线菜单按钮 ============ */
+  .menu-btn {
+    position: fixed;
+    top: 14px;
+    left: 14px;
+    z-index: 50;
+    width: 42px;
+    height: 42px;
+    border: none;
+    border-radius: 12px;
+    background: var(--panel);
+    color: var(--text);
+    font-size: 20px;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0,0,0,.08);
+  }
+
+  /* ============ 侧栏 ============ */
+  .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: var(--sidebar-w);
+    background: var(--panel);
+    border-right: 1px solid var(--line);
+    z-index: 40;
+    transform: translateX(-100%);
+    transition: transform .25s ease;
+    display: flex;
+    flex-direction: column;
+  }
+  body.sidebar-open .sidebar { transform: translateX(0); }
+
+  .sidebar-head {
+    padding: 72px 20px 16px;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    color: var(--text);
+  }
+
+  .sidebar-list { flex: 1; overflow-y: auto; padding: 0 12px; }
+
+  .proj-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 12px 10px 12px 14px;
+    margin-bottom: 6px;
+    border-radius: 12px;
+    cursor: pointer;
+  }
+  .proj-item:hover { background: var(--bg); }
+  .proj-item.active { background: var(--accent-tint); }
+  .proj-name {
+    flex: 1;
+    min-width: 0;
+    font-size: 15px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .proj-streak {
+    font-size: 13px;
+    color: var(--accent);
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+  .icon-btn {
+    flex-shrink: 0;
+    width: 30px;
+    height: 30px;
+    border: none;
+    background: transparent;
+    border-radius: 8px;
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .icon-btn:hover { background: var(--bg); }
+  .icon-btn.del:hover { color: #c0392b; }
+
+  /* 置顶针：未置顶 = 灰色；已置顶 = 原色高亮 + 浅紫底 */
+  .icon-btn.pin {
+    filter: grayscale(1);
+    opacity: .5;
+    transition: filter .2s ease, opacity .2s ease,
+                background .2s ease, transform .2s ease;
+  }
+  .icon-btn.pin.pinned {
+    filter: none;
+    opacity: 1;
+    background: var(--accent-tint);
+    transform: scale(1.08);
+  }
+
+  .sidebar-foot {
+    padding: 12px 12px 20px;
+    border-top: 1px solid var(--line);
+  }
+  .add-btn {
+    width: 100%;
+    height: 44px;
+    border: 1px dashed var(--line);
+    border-radius: 12px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 15px;
+    cursor: pointer;
+  }
+  .add-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  .backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.35);
+    z-index: 30;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity .25s ease, visibility .25s ease;
+  }
+  body.sidebar-open .backdrop { opacity: 1; visibility: visible; }
+
+  /* ============ 主内容 ============ */
+  .main { min-height: 100vh; transition: margin-left .25s ease; }
+  .wrap {
+    width: 100%;
+    max-width: 480px;
+    margin: 0 auto;
+    padding: 40px 24px 24px;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+
+  /* 空状态：无项目时独占页面 */
+  .empty {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    min-height: 60vh;
+  }
+  .empty-text { font-size: 16px; color: var(--muted); }
+  .empty .btn { width: 200px; }
+
+  /* 项目视图 */
+  #projView { flex: 1; }
+
+  h1 {
+    text-align: center;
+    font-size: 24px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    color: var(--text);
+    margin-top: 32px;
+    word-break: break-word;
+  }
+
+  /* 连续天数 */
+  .streak-box { margin-top: 56px; text-align: center; }
+  .streak-num {
+    display: inline-flex;
+    align-items: baseline;
+    font-size: 104px;
+    font-weight: 800;
+    line-height: 1;
+    color: var(--accent);
+  }
+  /* 只包裹数字本身，横线以它为基准居中，不会把「天」算进去 */
+  .streak-num .num-wrap {
+    position: relative;
+    display: inline-block;
+  }
+  .streak-num .streak-unit {
+    font-size: 26px;
+    font-weight: 600;
+    margin-left: 4px;
+  }
+
+  /* 划掉数字的那条线：水平 + 垂直双向居中 */
+  .streak-num .num-wrap::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 100%;
+    height: 6px;
+    background: var(--accent);
+    border-radius: 3px;
+    opacity: 0;
+  }
+  .streak-num.cross .num-wrap::after { animation: lineIn .25s ease forwards; }
+  @keyframes lineIn { from { opacity: 0; } to { opacity: 1; } }
+
+  .streak-num.line-out .num-wrap::after { animation: lineOut .25s ease forwards; }
+  @keyframes lineOut { from { opacity: 1; } to { opacity: 0; } }
+
+  .streak-num.fade-in { animation: fadeIn .3s ease forwards; }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+  .btn {
+    margin-top: 56px;
+    width: 100%;
+    height: 72px;
+    border: none;
+    border-radius: var(--radius);
+    background: var(--btn-idle);
+    color: #fff;
+    font-size: 24px;
+    font-weight: 700;
+    letter-spacing: 4px;
+    cursor: pointer;
+    box-shadow: 0 8px 20px rgba(35,35,38,.18);
+    transition: transform .1s ease, background .2s ease, box-shadow .2s ease;
+  }
+  .btn:active { transform: scale(.97); }
+  .btn.done {
+    background: var(--accent);
+    box-shadow: 0 8px 20px rgba(58,43,82,.25);
+    cursor: default;
+  }
+
+  .best { margin-top: 44px; text-align: center; font-size: 15px; color: var(--muted); }
+  .best b { color: var(--accent); font-weight: 700; }
+
+  /* ============ 创建项目弹窗 ============ */
+  .modal {
+    position: fixed;
+    inset: 0;
+    z-index: 70;
+    background: rgba(0,0,0,.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .modal-box {
+    width: 100%;
+    max-width: 320px;
+    background: var(--panel);
+    border-radius: 16px;
+    padding: 24px 20px;
+  }
+  .modal-title { font-size: 17px; font-weight: 700; margin-bottom: 16px; }
+  .modal input {
+    width: 100%;
+    height: 44px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 0 12px;
+    font-size: 15px;
+    color: var(--text);
+    outline: none;
+  }
+  .modal input:focus { border-color: var(--accent); }
+  .modal-msg { font-size: 13px; color: #c0392b; min-height: 20px; margin-top: 8px; }
+  .modal-actions { display: flex; gap: 8px; margin-top: 12px; }
+  .modal-actions button {
+    flex: 1;
+    height: 42px;
+    border: none;
+    border-radius: 10px;
+    font-size: 15px;
+    cursor: pointer;
+  }
+  .modal-actions .ok { background: var(--accent); color: #fff; }
+  .modal-actions .cancel { background: var(--bg); color: var(--text); }
+
+  @media (min-width: 769px) {
+    .main { margin-left: 0; }
+    body.sidebar-open .main { margin-left: var(--sidebar-w); }
+    .backdrop { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- 左上三横线：展开/收起侧栏 -->
+<button class="menu-btn" id="menuBtn" aria-label="菜单">☰</button>
+
+<!-- 侧栏 -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-head">坚持项目</div>
+  <div class="sidebar-list" id="projectList"></div>
+  <div class="sidebar-foot">
+    <button class="add-btn" id="addBtn">＋ 添加新项目</button>
+  </div>
+</aside>
+
+<!-- 移动端遮罩 -->
+<div class="backdrop" id="backdrop"></div>
+
+<!-- 主内容 -->
+<main class="main">
+  <div class="wrap">
+
+    <!-- ===== 状态 A：无项目（独占显示） ===== -->
+    <div class="empty" id="emptyView" hidden>
+      <div class="empty-text">还没有坚持项目</div>
+      <button class="btn" id="createBtn">创建项目</button>
+    </div>
+
+    <!-- ===== 状态 B：有项目（独占显示） ===== -->
+    <div id="projView" hidden>
+      <h1 id="projTitle"></h1>
+
+      <div class="streak-box">
+        <div class="streak-num" id="streakNumBox"><span class="num-wrap"><span id="streakNum">0</span></span><span class="streak-unit">天</span></div>
+      </div>
+
+      <button class="btn" id="btn">今天做了</button>
+
+      <div class="best">历史最长连续：<b id="bestNum">0</b> 天</div>
+    </div>
+
+  </div>
+</main>
+
+<!-- 创建项目弹窗 -->
+<div class="modal" id="modal" hidden>
+  <div class="modal-box">
+    <div class="modal-title">创建项目</div>
+    <input id="nameInput" type="text" placeholder="项目名称" maxlength="20">
+    <div class="modal-msg" id="addMsg"></div>
+    <div class="modal-actions">
+      <button class="cancel" id="cancelAdd">取消</button>
+      <button class="ok" id="confirmAdd">创建</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ---------- 工具 ---------- */
+  function dateStr(d) {
+    var y = d.getFullYear();
+    var m = String(d.getMonth() + 1).padStart(2, "0");
+    var day = String(d.getDate()).padStart(2, "0");
+    return y + "-" + m + "-" + day;
+  }
+  function addDays(d, n) {
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+  }
+  var today = function () { return dateStr(new Date()); };
+  var $ = function (id) { return document.getElementById(id); };
+
+  /* ---------- 数据 ---------- */
+  var STORAGE_KEY = "feiling_insist_v3";
+
+  function newId() {
+    return "p_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  }
+
+  function load() {
+    var raw = localStorage.getItem(STORAGE_KEY);
+    var data = null;
+    if (raw) {
+      try { data = JSON.parse(raw); } catch (e) { data = null; }
+    }
+    if (!data || !Array.isArray(data.projects)) {
+      return { currentId: null, projects: [] };
+    }
+    data.projects.forEach(function (p) {
+      if (!Array.isArray(p.completed)) p.completed = [];
+      if (typeof p.best !== "number") p.best = 0;
+      if (typeof p.pinned !== "boolean") p.pinned = false;
+    });
+    if (!data.currentId || !findProject(data, data.currentId)) {
+      data.currentId = data.projects.length ? data.projects[0].id : null;
+    }
+    return data;
+  }
+
+  function save(data) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  }
+
+  function findProject(data, id) {
+    for (var i = 0; i < data.projects.length; i++) {
+      if (data.projects[i].id === id) return data.projects[i];
+    }
+    return null;
+  }
+
+  function currentProject(data) {
+    return findProject(data, data.currentId) || data.projects[0] || null;
+  }
+
+  /* ---------- 连续天数（断签归零，最长另存） ---------- */
+  function computeStreak(completed) {
+    if (!completed.length) return 0;
+    var set = {};
+    completed.forEach(function (s) { set[s] = true; });
+
+    var t = dateStr(new Date());
+    var y = dateStr(addDays(new Date(), -1));
+
+    var anchor = null;
+    if (set[t]) anchor = t;
+    else if (set[y]) anchor = y;
+    else return 0;
+
+    var streak = 0;
+    var d = new Date(+anchor.slice(0, 4), +anchor.slice(5, 7) - 1, +anchor.slice(8, 10));
+    while (set[dateStr(d)]) {
+      streak++;
+      d = addDays(d, -1);
+    }
+    return streak;
+  }
+
+  /* ---------- 两种状态互斥显示 ---------- */
+  function showEmpty() {
+    $("emptyView").hidden = false;
+    $("projView").hidden = true;
+  }
+  function showProject() {
+    $("emptyView").hidden = true;
+    $("projView").hidden = false;
+  }
+
+  /* ---------- 渲染主页面 ---------- */
+  function renderMain() {
+    var data = load();
+
+    // 没有项目 → 只显示创建提示，项目区彻底隐藏
+    if (data.projects.length === 0) {
+      showEmpty();
+      return;
+    }
+
+    // 有项目 → 只显示项目内容，创建提示彻底隐藏
+    var proj = currentProject(data);
+    if (!proj) { showEmpty(); return; }
+
+    showProject();
+
+    $("projTitle").textContent = proj.name;
+    $("streakNum").textContent = computeStreak(proj.completed);
+    $("bestNum").textContent = proj.best;
+
+    var doneToday = proj.completed.indexOf(today()) !== -1;
+    var btn = $("btn");
+    if (doneToday) {
+      btn.textContent = "今天已完成";
+      btn.classList.add("done");
+      btn.disabled = true;
+    } else {
+      btn.textContent = "今天做了";
+      btn.classList.remove("done");
+      btn.disabled = false;
+    }
+  }
+
+  /* ---------- 渲染侧栏 ---------- */
+  function renderSidebar() {
+    var data = load();
+    var list = $("projectList");
+    list.innerHTML = "";
+
+    // 置顶的项目排最前，其余保持原顺序（稳定排序）
+    var items = data.projects.slice().sort(function (a, b) {
+      if (a.pinned && !b.pinned) return -1;
+      if (!a.pinned && b.pinned) return 1;
+      return 0;
+    });
+
+    items.forEach(function (p) {
+      var streak = computeStreak(p.completed);
+
+      var el = document.createElement("div");
+      el.className = "proj-item" + (p.id === data.currentId ? " active" : "");
+
+      var name = document.createElement("div");
+      name.className = "proj-name";
+      name.textContent = p.name;
+      el.appendChild(name);
+
+      var s = document.createElement("div");
+      s.className = "proj-streak";
+      s.textContent = streak + " 天";
+      el.appendChild(s);
+
+      var pin = document.createElement("button");
+      pin.className = "icon-btn pin" + (p.pinned ? " pinned" : "");
+      pin.textContent = "📌";
+      pin.title = p.pinned ? "取消置顶" : "置顶";
+      pin.addEventListener("click", function (e) {
+        e.stopPropagation();
+        togglePin(p.id);
+      });
+      el.appendChild(pin);
+
+      var del = document.createElement("button");
+      del.className = "icon-btn del";
+      del.textContent = "🗑️";
+      del.title = "删除";
+      del.addEventListener("click", function (e) {
+        e.stopPropagation();
+        deleteProject(p.id);
+      });
+      el.appendChild(del);
+
+      el.addEventListener("click", function () { selectProject(p.id); });
+      list.appendChild(el);
+    });
+  }
+
+  function renderAll() {
+    renderMain();
+    renderSidebar();
+  }
+
+  /* ---------- 打卡 ---------- */
+  function checkIn() {
+    var data = load();
+    var proj = currentProject(data);
+    if (!proj) return;
+
+    var t = today();
+    if (proj.completed.indexOf(t) !== -1) return;
+
+    var oldStreak = computeStreak(proj.completed);
+
+    proj.completed.push(t);
+    proj.best = Math.max(proj.best, computeStreak(proj.completed));
+    save(data);
+
+    var fresh = load();
+    var newStreak = computeStreak(currentProject(fresh).completed);
+    animateNumber(oldStreak, newStreak, renderAll);
+  }
+
+  /* 打卡动画：线条渐显 → 线条渐隐 → 新数字渐显（共约 0.8 秒） */
+  function animateNumber(from, to, done) {
+    var box = $("streakNumBox");
+    var num = $("streakNum");
+
+    num.textContent = from;
+    box.classList.remove("cross", "line-out", "fade-in");
+    void box.offsetWidth; // 强制重排，保证动画可重复触发
+
+    box.classList.add("cross");                        // 0 ~ 0.25s 线条渐显
+    setTimeout(function () {                           // 0.25 ~ 0.5s 线条渐隐
+      box.classList.remove("cross");
+      box.classList.add("line-out");
+    }, 250);
+    setTimeout(function () {                           // 0.5s 换成新数字
+      box.classList.remove("line-out");
+      num.textContent = to;
+      box.classList.add("fade-in");                    // 0.5 ~ 0.8s 新数字渐显
+    }, 500);
+    setTimeout(function () {
+      box.classList.remove("fade-in");
+      done();
+    }, 800);
+  }
+
+  /* ---------- 项目操作 ---------- */
+  function selectProject(id) {
+    var data = load();
+    data.currentId = id;
+    save(data);
+    renderAll();
+    if (window.innerWidth < 769) closeSidebar();
+  }
+
+  function togglePin(id) {
+    var data = load();
+    var p = findProject(data, id);
+    if (!p) return;
+    p.pinned = !p.pinned;
+    save(data);
+    renderSidebar();
+  }
+
+  function deleteProject(id) {
+    var data = load();
+    var p = findProject(data, id);
+    if (!p) return;
+    if (!confirm("确定删除项目「" + p.name + "」？此操作不可恢复。")) return;
+
+    data.projects = data.projects.filter(function (x) { return x.id !== id; });
+
+    if (data.currentId === id) {
+      data.currentId = data.projects.length ? data.projects[0].id : null;
+    }
+    save(data);
+    renderAll();
+  }
+
+  /* ---------- 侧栏开关 ---------- */
+  function closeSidebar() { document.body.classList.remove("sidebar-open"); }
+
+  /* ---------- 创建项目弹窗 ---------- */
+  function openModal() {
+    $("modal").hidden = false;
+    $("nameInput").value = "";
+    $("addMsg").textContent = "";
+    setTimeout(function () { $("nameInput").focus(); }, 30);
+  }
+  function closeModal() { $("modal").hidden = true; }
+
+  function confirmAdd() {
+    var name = $("nameInput").value.trim();
+    if (!name) { $("addMsg").textContent = "名称不能为空"; return; }
+
+    var data = load();
+    var dup = data.projects.some(function (p) { return p.name === name; });
+    if (dup) { $("addMsg").textContent = "项目已存在"; return; }
+
+    var id = newId();
+    data.projects.push({ id: id, name: name, completed: [], best: 0, pinned: false });
+    data.currentId = id;
+    save(data);
+    closeModal();
+    renderAll();
+    if (window.innerWidth < 769) closeSidebar();
+  }
+
+  /* ---------- 事件绑定 ---------- */
+  $("btn").addEventListener("click", checkIn);
+
+  $("menuBtn").addEventListener("click", function () {
+    document.body.classList.toggle("sidebar-open");
+  });
+  $("backdrop").addEventListener("click", closeSidebar);
+
+  $("addBtn").addEventListener("click", openModal);
+  $("createBtn").addEventListener("click", openModal);
+  $("confirmAdd").addEventListener("click", confirmAdd);
+  $("cancelAdd").addEventListener("click", closeModal);
+  $("nameInput").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") confirmAdd();
+  });
+  $("modal").addEventListener("click", function (e) {
+    if (e.target === this) closeModal();   // 点遮罩空白处关闭
+  });
+
+  /* ---------- 启动 ---------- */
+  if (window.innerWidth >= 769) document.body.classList.add("sidebar-open");
+  renderAll();
+})();
+</script>
+</body>
+</html>
